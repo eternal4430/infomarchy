@@ -8,13 +8,19 @@ whoever reviews this for a merge — end-user docs live in `README.md`
 
 ## What this branch adds
 
-Two independent capabilities, four commits, three new files:
+Two independent capabilities, three new files (`git log` on this branch
+has the full commit-by-commit history, including one self-correction —
+see "Hermes's cost figure bypasses `pricing.json`" below):
 
 1. **Presence detection** (`fleet-remote.ts`) — is a known AI provider
    running on a configured remote host, reached over `ssh`.
-2. **Hermes/OpenRouter usage** (`hermes-usage.ts`) — token counts and cost
-   for whichever hosts are running Hermes, read from Hermes's own local
-   SQLite billing ledger, merged into the existing USAGE & LIMITS card.
+2. **Hermes/OpenRouter usage** (`hermes-usage.ts`) — token counts, per-model
+   breakdown, cost and a monthly limit bar for whichever hosts are running
+   Hermes, merged into the existing USAGE & LIMITS card. Reads two files
+   on the host in one SSH round trip: Hermes's local SQLite billing ledger
+   for tokens/breakdown, and Hermes's own cached snapshot of OpenRouter's
+   key-usage API for the dollar figures and the limit. See below — the
+   first version used the ledger for both, and that was wrong.
 
 Both are gated by one env var, `INFOMARCHY_FLEET_HOSTS` (comma-separated
 ssh aliases, `label=host` optional), read the same way `OLLAMA_HOST` and
@@ -105,36 +111,81 @@ The intent throughout was a diff small enough to rebase against upstream
 `master` without fighting unrelated changes, and — if the maintainer wants
 it — clean enough to open as a PR as-is.
 
-## The one deliberate deviation: Hermes's cost figure bypasses `pricing.json`
+## Hermes's cost figure bypasses `pricing.json` — and a real bug on the way there
 
 `pricing.json` is a pinned LiteLLM snapshot with **zero** entries for any
 `deepseek/*` model id (checked directly, not assumed). Feeding Hermes's
 token counts through the standard `valueSummary()`/`estimateValue()` path
-would silently report the whole row as *unpriced* — technically consistent
-with every other provider, but wrong, because Hermes already computed a
-real cost estimate itself (`session_model_usage.estimated_cost_usd`,
-`cost_source: provider_models_api` — Hermes resolves live OpenRouter
-pricing on its own end). `hermesUsageActivity()` in `collector.ts` calls
-`normalizeUsage()` as usual for shape/limits/model-breakdown, then
-overwrites just the `.value` field with Hermes's own summed cost:
+would report the whole row as *unpriced*, so the dollar figure was always
+going to have to come from somewhere else. The first version of this
+branch got the "somewhere else" wrong.
 
-```ts
-usage.value = { lifetime: summary.costLifetimeUsd, today: summary.costTodayUsd, pricedShare: priced ? 1 : 0, unpriced: [], totals };
+**First attempt (now reverted):** sum `session_model_usage.estimated_cost_usd`
+across every row in Hermes's local ledger and call the sum "lifetime."
+Shipped, tested, verified live against the real VPS, and screenshotted
+through the actual desktop overlay showing `$0.37 lifetime` — every check
+this branch runs passed, because every check compared the card's number
+against the *ledger's* number, and the ledger and the card agreed with
+each other perfectly. What none of those checks did was compare against
+the *actual OpenRouter account*, because nothing in the pipeline read from
+OpenRouter.
+
+**What caught it:** the person testing this compared the live card against
+their own openrouter.ai dashboard by hand and asked, in effect, "why does
+your $0.37 not match my $0.60?" Investigating live (not from memory):
+
+```
+$ ssh vps "sqlite3 -readonly ~/.hermes/state.db \
+    'SELECT MIN(last_seen), MAX(last_seen), COUNT(*) FROM session_model_usage;'"
+2026-09-17 20:48:00 | 2026-09-18 08:03:29 | 12
 ```
 
-This is the only place in the new code that departs from "everything
-flows through the existing normalization path unchanged." It's called out
-here because it's the one design call a reviewer might reasonably want to
-push back on — the alternative (hand-adding OpenRouter model entries to
-`pricing.json`) was rejected because it means maintaining a competing,
-easily-stale price list for exactly the models least likely to be updated
-in a pinned upstream snapshot.
+Twelve rows, spanning about eleven hours — not lifetime anything. The
+Hermes processes themselves had only been up 16.5 hours. The ledger table
+is scoped to Hermes's *current session-tracking window*, not the
+OpenRouter account's history, and nothing about its schema or the
+collector's use of it said so.
 
-One observed limitation, not hidden: `actual_cost_usd` was `0.0` on every
-row read from the real ledger — Hermes doesn't appear to reconcile a
-verified billed figure yet, only its own estimate. `estimated_cost_usd` is
-what's used, and the card's `usageStatusText` says "estimated by Hermes,"
-not "verified."
+**The fix:** Hermes already caches something authoritative on the same
+host — `~/.hermes/workspace/openrouter_key_usage.json`, refreshed from
+OpenRouter's own key-usage API:
+
+```json
+{ "checked_at_utc": "2026-09-18T08:00Z", "limit": 20, "limit_remaining": 19.41,
+  "usage_total": 10.618429343, "usage_daily": 0.358221824, "usage_weekly": 0.589249832 }
+```
+
+`usage_total` ($10.62) is the real lifetime figure; `usage_weekly`
+($0.589) matched the two-day total from the dashboard almost exactly.
+`hermesUsageSummary()` in `hermes-usage.ts` now reads this file (one extra
+`cat`, folded into the *same* SSH call as the sqlite query via a delimiter
+so the 60 s refresh doesn't pay for a second round trip) and prefers its
+`usage_total`/`usage_daily` over the ledger's own per-row sum whenever the
+read succeeds; `costSource: "openrouter" | "ledger"` on the summary
+records which one actually produced the number, and the card's
+`usageStatusText` says so. The ledger's per-row `estimated_cost_usd` sum
+is now a fallback only, used when the key-usage file is absent — still
+better than nothing, but no longer trusted for "lifetime."
+
+The `limit`/`limit_remaining` fields also produce a real **MONTHLY** limit
+bar (`percent = usage_monthly / limit`), which didn't exist in the first
+version at all — the ledger has no equivalent concept, so this is new
+capability the fix picked up for free, not just a correction.
+
+One observed limitation, not hidden: `session_model_usage.actual_cost_usd`
+was `0.0` on every row read from the real ledger — Hermes doesn't appear
+to reconcile a verified billed figure at that layer either. Neither source
+this card reads is a verified invoice; the status line says so either way.
+
+**The actual lesson, not just the bug:** every verification step run
+during the first pass was real and passed — unit tests, live SSH probes,
+byte-for-byte comparison of the card's numbers against the ledger's raw
+rows, a screenshot through the real overlay. All of it confirmed the code
+faithfully reported what the ledger said. None of it asked whether the
+ledger itself was the right thing to be faithful to. "Verified live"
+caught this bug, but only once verification meant comparing against the
+outside system the number claims to represent (OpenRouter's own
+dashboard), not just against the intermediate data source this code reads.
 
 ## Security model for the two SSH probes
 
@@ -155,6 +206,11 @@ not "verified."
   **fails the probe**, never hangs or falls back to interactive auth.
 - `sqlite3 -readonly` is defense in depth on top of the query already
   being a `SELECT`.
+- The ledger query and the key-usage `cat` run in one SSH call, split
+  client-side on a fixed delimiter string (`OUTPUT_DELIMITER`) that is
+  never derived from remote or configured input — it's only ever matched
+  against this module's own command's output, so there's no way for
+  either file's content to forge a false split.
 - No credential of any kind is introduced. Auth is whatever `ssh <alias>`
   already does on this machine (`~/.ssh/config`), same as every other tool
   the user already runs by hand.
@@ -208,10 +264,16 @@ accepted cost for this exact idiom, not a new class of problem.
   processes; cross-checked both pids directly against the VPS's own `ps`
   output (not just trusted the collector's own report) — both were
   genuine Hermes processes (`hermes dashboard`, `hermes gateway run`).
-- Hermes usage against the real VPS: lifetime cost, today's cost, token
-  totals and per-model session count all cross-checked against raw
-  `sqlite3 -json` query output by hand — not just against the collector's
-  own transformation of that output.
+- Hermes usage against the real VPS: token totals and per-model session
+  count cross-checked against raw `sqlite3 -json` query output by hand.
+  The *cost* figures from that same first pass were also cross-checked
+  against the raw ledger and matched it exactly — which is precisely how
+  a wrong "lifetime" shipped past every check for a full round of
+  fleet/QML work. Caught only when compared against a third, independent
+  source: the user's own openrouter.ai dashboard. The rewrite's cost
+  figures were then cross-checked against `openrouter_key_usage.json`
+  directly (`$10.618429343` lifetime, `$0.358221824` today, both exact),
+  screenshotted through the real overlay a second time.
 - `omarchy-shell infomarchy` activation: `hl.env(...)` in
   `~/.config/hypr/autostart.lua` only executes at Hyprland's own session
   start, confirmed by checking `/proc/<pid>/environ` on the live
@@ -223,15 +285,19 @@ accepted cost for this exact idiom, not a new class of problem.
 
 ## Test coverage
 
-`fleet-remote.test.ts` (18 tests) and `hermes-usage.test.ts` (12 tests):
+`fleet-remote.test.ts` (18 tests) and `hermes-usage.test.ts` (21 tests):
 config parsing and its three injection-adjacent rejection cases, argv[0]-
 only matching, throttle timing, disk round-trip (including a deliberately
 malformed/oversized/wrong-shaped store file), aggregation math (tokens,
 cost, sessions, day-bucketing) across multiple hosts including one that
-failed, and a runner that throws. `bun test`: 265/266 at time of writing;
-the one failure is `Infomarchy.qml`'s qmllint ceiling, pre-existing and
-unrelated — reproduces identically on `master`, confirmed with `git
-stash` before assuming it wasn't this branch's doing.
+failed, a runner that throws, the ledger/key-usage delimiter split (each
+source present independently of the other), and — added with the cost
+fix — a test asserting the key-usage figure is preferred over the
+ledger's sum whenever both are available, with a comment pointing at the
+live bug this exists to prevent regressing. `bun test`: 274/275 at time of
+writing; the one failure is `Infomarchy.qml`'s qmllint ceiling,
+pre-existing and unrelated — reproduces identically on `master`, confirmed
+with `git stash` before assuming it wasn't this branch's doing.
 
 ## Open follow-ups, not attempted here
 
@@ -245,3 +311,13 @@ stash` before assuming it wasn't this branch's doing.
   out in `fleet-remote.ts`'s own header comment.
 - `HERMES_HOME` overrides aren't resolvable remotely without a second SSH
   round trip; only the default `~/.hermes` location is read.
+- The MONTHLY limit bar has no `resetsAt` — `openrouter_key_usage.json`
+  doesn't give an exact reset timestamp, only `limit_reset: "monthly"` as
+  free text, and guessing a calendar-month boundary risked being wrong for
+  a billing cycle that doesn't actually reset on the 1st. Left empty
+  rather than guessed, same call the rest of the project already makes
+  for anything it can't measure.
+- `openrouter_key_usage.json`'s own `checked_at_utc` (how stale Hermes's
+  cache is) is parsed and stored but not surfaced anywhere in the UI yet —
+  available on `HermesKeyUsage.checkedAtMs` if a future pass wants to show
+  it, e.g. in the card's hint text.
