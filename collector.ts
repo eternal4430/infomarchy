@@ -19,6 +19,7 @@ import { giteaConfig, giteaRefreshDue, giteaSnapshot, parseGiteaStore, refreshGi
 import { attentionSignal, parseCommitSummary, parseDiffNumstat, parseGitStatus, projectHealth, repoCollisions, workspaceGroups, resourceDelta, limitForecast } from "./ai-ops";
 import { deriveNotificationEvents } from "./notification-events";
 import { fleetEnabled, fleetHostsFromEnv, fleetRefreshDue, fleetSnapshot, parseFleetStoreText, refreshFleet } from "./fleet-remote";
+import { hermesUsageRefreshDue, hermesUsageSummary, parseHermesUsageStoreText, refreshHermesUsage } from "./hermes-usage";
 
 const HOME = process.env.HOME || "/root";
 const XDG_STATE = process.env.XDG_STATE_HOME || join(HOME, ".local/state");
@@ -38,6 +39,7 @@ const GITEA_FILE = join(STATE_DIR, "gitea-activity.json");
 // Same one-writer sharing as GITHUB_FILE, so background + overlay never SSH
 // out independently and double the probes.
 const FLEET_FILE = join(STATE_DIR, "fleet.json");
+const HERMES_USAGE_FILE = join(STATE_DIR, "hermes-usage.json");
 const now = Date.now();
 const MIN_RATE_DT = 1;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -417,6 +419,43 @@ async function fleetActivity() {
     return fleetSnapshot(refreshed);
   }
   return fleetSnapshot(store);
+}
+
+// Hermes/OpenRouter model usage, read from the same configured hosts (see
+// hermes-usage.ts for why this reads Hermes's own billing ledger instead of
+// calling OpenRouter directly). Same one-writer-shares-with-overlay and
+// disk-persisted-throttle shape as fleetActivity() above.
+const HERMES_USAGE_WRITER = instanceId() !== "overlay";
+async function hermesUsageActivity() {
+  const hosts = fleetHostsFromEnv();
+  if (!hosts.length || !fleetEnabled()) return null;
+  const store = parseHermesUsageStoreText(read(HERMES_USAGE_FILE));
+  let current = store;
+  if (HERMES_USAGE_WRITER && hermesUsageRefreshDue(store, now)) {
+    current = await refreshHermesUsage(store, now, hosts, run);
+    try { writePrivateStateFile(STATE_DIR, basename(HERMES_USAGE_FILE), JSON.stringify(current)); } catch {}
+  }
+  const summary = hermesUsageSummary(current, heatDays.map(localDayKey));
+  if (!summary) return null;
+  const usage = normalizeUsage({
+    name: "Hermes", ready: true, tierLabel: "",
+    todayPrompts: summary.todayPrompts, totalPrompts: summary.totalPrompts,
+    todaySessions: summary.todaySessions, totalSessions: summary.totalSessions,
+    todayTotalTokens: summary.todayTotalTokens,
+    modelUsage: summary.modelUsage, todayTokensByModel: summary.todayTokensByModel, modelSessions: summary.modelSessions,
+    recentDays: summary.recentDays, limits: [],
+    usageStatusText: "estimated by Hermes from live OpenRouter pricing — not a verified invoice",
+  });
+  // pricing.json is a pinned LiteLLM snapshot with no entries for most
+  // OpenRouter model ids (deepseek/deepseek-v4.1-flash among them), so the
+  // normalizeUsage() pass above reports this unpriced. Hermes already
+  // resolved a live OpenRouter rate per row (cost_source:
+  // provider_models_api) that is at least as current as a pinned snapshot
+  // would be, so use it instead of leaving the card blank.
+  const totals = usage.value.totals;
+  const priced = totals.inputTokens + totals.outputTokens + totals.cacheReadInputTokens + totals.cacheCreationInputTokens > 0;
+  usage.value = { lifetime: summary.costLifetimeUsd, today: summary.costTodayUsd, pricedShare: priced ? 1 : 0, unpriced: [], totals };
+  return usage;
 }
 
 // ---------------------------------------------------------------- machine
@@ -2803,10 +2842,14 @@ async function runCollector() {
     return;
   }
   const pids = scanProcs();
-  const [cpuS, memS, diskS, netS, pingS, gpuS, sessions, ollama, externalIpS, github, gitea, fleet] = await Promise.all([
-    Promise.resolve(cpu()), Promise.resolve(mem()), disk(), net(), ping(), gpu(), liveSessions(pids), ollamaState(), externalIp(), githubActivity(), giteaActivity(), fleetActivity(),
+  const [cpuS, memS, diskS, netS, pingS, gpuS, sessions, ollama, externalIpS, github, gitea, fleet, hermesUsage] = await Promise.all([
+    Promise.resolve(cpu()), Promise.resolve(mem()), disk(), net(), ping(), gpu(), liveSessions(pids), ollamaState(), externalIp(), githubActivity(), giteaActivity(), fleetActivity(), hermesUsageActivity(),
   ]);
   const claude = claudeHistory(), codex = codexHistory(), grok = grokHistory(), grokBot = grokBotHistory(), opencode = opencodeHistory(), pi = piHistory(), hermes = hermesHistory(), kimi = kimiHistory(), cursor = cursorHistory();
+  // Same priority as grok's own fallback below: a real cache (Omarchy's own
+  // agents plugin) always wins over what we can read ourselves.
+  const usage = agentsUsage();
+  if (!usage.hermes && hermesUsage) usage.hermes = hermesUsage;
   recent.sort((a, b) => b.ts - a.ts);
   for (const entry of recent) entry.activityCell = activityCellIndex(entry.ts, heatDays);
   inferSessionIdsFromRecent(sessions, recent);
@@ -2839,7 +2882,7 @@ async function runCollector() {
       attention: sessions.filter((s: any) => s.attention),
       events: notificationState.events,
       collisions: repoCollisions(sessions),
-      counts, providers: { claude, codex, grok, grokBot, opencode, pi, hermes, kimi, cursor, ollama }, usage: agentsUsage(),
+      counts, providers: { claude, codex, grok, grokBot, opencode, pi, hermes, kimi, cursor, ollama }, usage,
       usageDays: heatDays.map(localDayKey),
       heatmap: { start: start7, days: heatDays, cells: heat.map(c => [c.n, c.p]) },
       github, gitea,
