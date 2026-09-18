@@ -321,3 +321,23 @@ with `git stash` before assuming it wasn't this branch's doing.
   cache is) is parsed and stored but not surfaced anywhere in the UI yet —
   available on `HermesKeyUsage.checkedAtMs` if a future pass wants to show
   it, e.g. in the card's hint text.
+- **The cost fix assumes all of Hermes's billing goes through OpenRouter.**
+  `hermesUsageSummary()` prefers `openrouter_key_usage.json`'s account-level
+  totals wholesale over the ledger's own per-row sum whenever the file is
+  present — it does not check that the ledger's `billing_provider` column
+  is still `"openrouter"` before doing so. Token counts and the per-model
+  breakdown stay accurate regardless of model or provider, since those are
+  read from the ledger's own `model` column with nothing hardcoded (checked
+  directly — no model name appears anywhere in `hermes-usage.ts` or
+  `fleet-remote.ts`, only in a comment). But if Hermes is ever pointed at a
+  model billed through something *other* than OpenRouter — direct
+  Anthropic/OpenAI, say — the cost figure would go quietly wrong in the
+  opposite direction from the original bug: `openrouter_key_usage.json`
+  would keep reporting only OpenRouter spend, and real spend on the
+  non-OpenRouter provider would go uncounted rather than double-counted or
+  flagged. A same-provider (OpenRouter) model switch, including the case
+  this was actually asked about — changing Hermes's default model away
+  from Deepseek — is fully handled by the mechanism as built. A future fix
+  would need to sum ledger cost separately for any row whose
+  `billing_provider` isn't `"openrouter"` and add it to the key-usage
+  figure, rather than the current all-or-nothing preference.
