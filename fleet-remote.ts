@@ -85,6 +85,51 @@ export function emptyFleetStore(): FleetStore {
   return { checkedAt: 0, results: [] };
 }
 
+const FLEET_STORE_MAX_BYTES = 262_144;
+
+function finite(value: unknown): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+function normalizeAgent(raw: unknown): FleetAgent | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const source = raw as Record<string, unknown>;
+  const provider = typeof source.provider === "string" ? source.provider.slice(0, 32) : "";
+  const pid = Math.floor(finite(source.pid));
+  return provider && pid > 0 ? { provider, pid } : null;
+}
+
+function normalizeHostResult(raw: unknown): FleetHostResult | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const source = raw as Record<string, unknown>;
+  const host = validHost(String(source.host ?? ""));
+  if (!host) return null;
+  const label = validLabel(String(source.label ?? ""), host);
+  const agents = Array.isArray(source.agents)
+    ? source.agents.slice(0, MAX_AGENTS_PER_HOST).map(normalizeAgent).filter((a): a is FleetAgent => a !== null)
+    : [];
+  return { label, host, ok: source.ok === true, agents, checkedAt: finite(source.checkedAt), latencyMs: finite(source.latencyMs) };
+}
+
+// Disk-persisted between collector ticks — collector.ts is re-invoked fresh
+// every 5s, so this is the only place refresh throttling can live. Same
+// shape of trust as github-activity.ts's store: never assume the file on
+// disk still matches this module's types.
+export function normalizeFleetStore(raw: unknown): FleetStore {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return emptyFleetStore();
+  const source = raw as Record<string, unknown>;
+  const results = Array.isArray(source.results)
+    ? source.results.slice(0, MAX_FLEET_HOSTS).map(normalizeHostResult).filter((r): r is FleetHostResult => r !== null)
+    : [];
+  return { checkedAt: finite(source.checkedAt), results };
+}
+
+export function parseFleetStoreText(text: string | null | undefined): FleetStore {
+  if (typeof text !== "string" || !text || text.length > FLEET_STORE_MAX_BYTES) return emptyFleetStore();
+  try { return normalizeFleetStore(JSON.parse(text)); } catch { return emptyFleetStore(); }
+}
+
 export function fleetRefreshDue(store: FleetStore, now: number): boolean {
   const last = store.checkedAt || 0;
   if (!(last > 0) || last > now) return true;

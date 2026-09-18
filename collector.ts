@@ -18,6 +18,7 @@ import { githubFetchEnabled, githubRefreshDue, githubRepoFromRemote, githubSnaps
 import { giteaConfig, giteaRefreshDue, giteaSnapshot, parseGiteaStore, refreshGiteaActivity } from "./gitea-activity";
 import { attentionSignal, parseCommitSummary, parseDiffNumstat, parseGitStatus, projectHealth, repoCollisions, workspaceGroups, resourceDelta, limitForecast } from "./ai-ops";
 import { deriveNotificationEvents } from "./notification-events";
+import { fleetEnabled, fleetHostsFromEnv, fleetRefreshDue, fleetSnapshot, parseFleetStoreText, refreshFleet } from "./fleet-remote";
 
 const HOME = process.env.HOME || "/root";
 const XDG_STATE = process.env.XDG_STATE_HOME || join(HOME, ".local/state");
@@ -34,6 +35,9 @@ const PREV_FILE = join(STATE_DIR, `prev-${instanceId()}.json`);
 // wallpaper and the overlay, and one 7-day store means one set of API calls.
 const GITHUB_FILE = join(STATE_DIR, "github-activity.json");
 const GITEA_FILE = join(STATE_DIR, "gitea-activity.json");
+// Same one-writer sharing as GITHUB_FILE, so background + overlay never SSH
+// out independently and double the probes.
+const FLEET_FILE = join(STATE_DIR, "fleet.json");
 const now = Date.now();
 const MIN_RATE_DT = 1;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -395,6 +399,24 @@ async function giteaActivity() {
     try { writePrivateStateFile(STATE_DIR, basename(GITEA_FILE), JSON.stringify(store)); } catch {}
   }
   return giteaSnapshot(store, config, now, heatDays, activityCellIndex);
+}
+
+// Fleet: other machines' AI agents, seen over SSH (see fleet-remote.ts).
+// Same cache-then-refresh shape as githubActivity() above, since this
+// process is re-invoked fresh every tick and has no other place to keep a
+// refresh clock. Unconfigured (no INFOMARCHY_FLEET_HOSTS) costs one env read
+// and nothing else — no probe, no state file, no card.
+const FLEET_WRITER = instanceId() !== "overlay";
+async function fleetActivity() {
+  const hosts = fleetHostsFromEnv();
+  if (!hosts.length || !fleetEnabled()) return [];
+  const store = parseFleetStoreText(read(FLEET_FILE));
+  if (FLEET_WRITER && fleetRefreshDue(store, now)) {
+    const refreshed = await refreshFleet(store, now, hosts, run, providerOf);
+    try { writePrivateStateFile(STATE_DIR, basename(FLEET_FILE), JSON.stringify(refreshed)); } catch {}
+    return fleetSnapshot(refreshed);
+  }
+  return fleetSnapshot(store);
 }
 
 // ---------------------------------------------------------------- machine
@@ -2770,7 +2792,7 @@ function demoSnapshot(stamp = Date.now()) {
         claude: { name: "Claude", ready: true, tierLabel: "Max", todayPrompts: 18, todayTotalTokens: 184_000, limits: [{ label: "SESSION", percent: 0.46, resetsAt: new Date(stamp + 2.1 * 3600_000).toISOString() }, { label: "WEEKLY", percent: 0.61, resetsAt: new Date(stamp + 3.4 * 86400_000).toISOString() }] },
         codex: { name: "Codex", ready: true, tierLabel: "Pro", todayPrompts: 27, todayTotalTokens: 311_000, limits: [{ label: "5-HOUR", percent: 0.38, resetsAt: new Date(stamp + 3.2 * 3600_000).toISOString() }, { label: "7-DAY", percent: 0.54, resetsAt: new Date(stamp + 4.2 * 86400_000).toISOString() }] },
       },
-      heatmap: { start: dayStarts[0], days: dayStarts, cells }, github, gitea, recent, recentTruncated: false,
+      heatmap: { start: dayStarts[0], days: dayStarts, cells }, github, gitea, fleet: [], recent, recentTruncated: false,
     },
   };
 }
@@ -2781,8 +2803,8 @@ async function runCollector() {
     return;
   }
   const pids = scanProcs();
-  const [cpuS, memS, diskS, netS, pingS, gpuS, sessions, ollama, externalIpS, github, gitea] = await Promise.all([
-    Promise.resolve(cpu()), Promise.resolve(mem()), disk(), net(), ping(), gpu(), liveSessions(pids), ollamaState(), externalIp(), githubActivity(), giteaActivity(),
+  const [cpuS, memS, diskS, netS, pingS, gpuS, sessions, ollama, externalIpS, github, gitea, fleet] = await Promise.all([
+    Promise.resolve(cpu()), Promise.resolve(mem()), disk(), net(), ping(), gpu(), liveSessions(pids), ollamaState(), externalIp(), githubActivity(), giteaActivity(), fleetActivity(),
   ]);
   const claude = claudeHistory(), codex = codexHistory(), grok = grokHistory(), grokBot = grokBotHistory(), opencode = opencodeHistory(), pi = piHistory(), hermes = hermesHistory(), kimi = kimiHistory(), cursor = cursorHistory();
   recent.sort((a, b) => b.ts - a.ts);
@@ -2821,6 +2843,7 @@ async function runCollector() {
       usageDays: heatDays.map(localDayKey),
       heatmap: { start: start7, days: heatDays, cells: heat.map(c => [c.n, c.p]) },
       github, gitea,
+      fleet,
       recent: dashboardRecent, recentTruncated,
     },
   };

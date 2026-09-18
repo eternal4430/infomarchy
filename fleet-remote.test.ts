@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   emptyFleetStore, fleetEnabled, fleetHostsFromEnv, fleetRefreshDue, fleetSnapshot,
-  parseAgents, refreshFleet, FLEET_REFRESH_MS, type FleetRunner,
+  parseAgents, parseFleetStoreText, refreshFleet, FLEET_REFRESH_MS, type FleetRunner,
 } from "./fleet-remote";
 
 const fakeProviderOf = (cmd: string[]): string | null => {
@@ -113,5 +113,34 @@ describe("refreshFleet + fleetSnapshot", () => {
     const runner: FleetRunner = async () => { throw new Error("should not be called"); };
     const store = await refreshFleet(emptyFleetStore(), 5000, [], runner, fakeProviderOf);
     expect(fleetSnapshot(store)).toEqual([]);
+  });
+});
+
+describe("parseFleetStoreText", () => {
+  test("round-trips a store written by refreshFleet", async () => {
+    const runner: FleetRunner = async () => "823 /usr/bin/hermes";
+    const store = await refreshFleet(emptyFleetStore(), 5000, [{ label: "vps", host: "vps" }], runner, fakeProviderOf);
+    expect(parseFleetStoreText(JSON.stringify(store))).toEqual(store);
+  });
+
+  test("degrades to an empty store on missing, oversized, or malformed input", () => {
+    expect(parseFleetStoreText(null)).toEqual(emptyFleetStore());
+    expect(parseFleetStoreText("")).toEqual(emptyFleetStore());
+    expect(parseFleetStoreText("not json")).toEqual(emptyFleetStore());
+    expect(parseFleetStoreText("x".repeat(300_000))).toEqual(emptyFleetStore());
+  });
+
+  test("drops a result with an invalid host and agents with a bad shape rather than trusting the file", () => {
+    const dirty = JSON.stringify({
+      checkedAt: 1000,
+      results: [
+        { label: "ok", host: "-evil-flag", ok: true, agents: [], checkedAt: 1000, latencyMs: 5 },
+        { label: "good", host: "good-host", ok: true, agents: [{ provider: "hermes", pid: 5 }, { provider: "", pid: 6 }, "garbage"], checkedAt: 1000, latencyMs: 5 },
+      ],
+    });
+    expect(parseFleetStoreText(dirty)).toEqual({
+      checkedAt: 1000,
+      results: [{ label: "good", host: "good-host", ok: true, agents: [{ provider: "hermes", pid: 5 }], checkedAt: 1000, latencyMs: 5 }],
+    });
   });
 });
