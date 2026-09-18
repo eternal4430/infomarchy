@@ -22,12 +22,17 @@ import { join } from "path";
 // A ceiling still catches the case that matters: one new unresolvable
 // reference moves the count, which is exactly what a bad merge introduces.
 // Verified — the same injection took InfoModel from 5 to 6.
+// Privacy adds unqualified bindings for the status chip and overlay hotkey.
 const CEILINGS: Record<string, number> = {
   "BackgroundWallpaper.qml": 0,
   "Infomarchy.qml": 26,
   "InfoModel.qml": 5,
   "InfoSettings.qml": 0,
-  "InfoView.qml": 501,
+  // 509 came in with privacy mode (#17). The two above it are the topic mask
+  // folded into that merge: qmllint cannot resolve a view-scoped function, so
+  // each call site of displayTopic reads as a missing property, exactly like
+  // the displayTitle calls already counted here.
+  "InfoView.qml": 511,
   "Overlay.qml": 29,
   "WaveWallpaper.qml": 0,
 };

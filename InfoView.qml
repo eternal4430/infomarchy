@@ -72,6 +72,7 @@ Item {
   // Previews are deleted when replaced (below), when the feature is turned
   // off, when their session is gone, and when this view goes away.
   onPreviewsEnabledChanged: if (!previewsEnabled) dropPreviews(null)
+  onPrivacyModeChanged: if (privacyMode && previewsEnabled) previewsEnabled = false
   onAllSessionsChanged: {
     var live = {}
     for (var i = 0; i < allSessions.length; i++) if (allSessions[i].window && allSessions[i].window.address) live[String(allSessions[i].window.address)] = true
@@ -96,6 +97,7 @@ Item {
   property int topInset: Math.round(40 * Style.fontScale)
 
   readonly property var snap: (desk && desk.snap) ? desk.snap : ({})
+  readonly property bool privacyMode: !!(settings && settings.privacyMode)
   readonly property var machine: snap.machine || ({})
   readonly property var mprisPlayers: Mpris.players && Mpris.players.values ? Mpris.players.values : []
   function mediaIsProxy(player) {
@@ -293,6 +295,48 @@ Item {
   component PlainText: Text { textFormat: Text.PlainText }
 
   function sectionEnabled(id) { return view.settings.sectionEnabled(id) }
+  // Collapse /home/<user> so a mount or slipped cwd cannot name the account.
+  function displayPath(path) {
+    var p = String(path || "")
+    return privacyMode ? p.replace(/^\/home\/[^/]+/, "~") : p
+  }
+  // A terminal title is usually `user@host: /home/user/dir`, which names the
+  // account, the machine and the home path in one line. Mask all three.
+  function displayTitle(title) {
+    var t = String(title || "")
+    if (!privacyMode) return t
+    return t.replace(/\/home\/[^\/\s]+/g, "~").replace(/[A-Za-z0-9._-]+@[A-Za-z0-9._-]+/g, "user@host")
+  }
+  // Stream privacy: keep the first four words of a recent-task prompt (in the
+  // 3 to 5 range), then a fixed mask so the rest of the ask and its length stay off
+  // the desk. Four or fewer words pass through.
+  function obfuscatePrompt(text) {
+    var s = String(text || "").replace(/\s+/g, " ").trim()
+    if (!s) return ""
+    var words = s.split(" ")
+    if (words.length <= 4) return s
+    return words.slice(0, 4).join(" ") + " ···"
+  }
+  function displayPrompt(text) {
+    return privacyMode ? obfuscatePrompt(text) : String(text || "")
+  }
+  // A topic is the top keywords lifted verbatim from recent prompts, so under
+  // privacy it is dropped rather than shortened: keeping four words of it would
+  // publish the distinctive part of the prompt the mask above just hid.
+  function displayTopic(topic) {
+    return privacyMode ? "" : String(topic || "")
+  }
+  function machineHint() {
+    var up = "up " + view.desk.dur(view.machine.uptime)
+    if (privacyMode) return "privacy · " + up
+    return ((view.snap.user ? view.snap.user + "@" : "") + (view.snap.host || "")) + " · " + up
+  }
+  function wifiLabel(net) {
+    var n = net || ({})
+    if (!n.wireless) return "NET " + (n.dev || "—")
+    return privacyMode ? "WIFI" : ("WIFI " + (n.ssid || ""))
+  }
+  function wanText() { return privacyMode ? "—" : (view.machine.externalIp || "—") }
   function attentionKey(item) { return String(item.provider || "") + ":" + String(item.pid || "") + ":" + String(item.attention || "") + ":" + String(item.attentionReason || "") }
   function promptKey(item) { return String(item.provider || "") + ":" + String(item.session || "") + ":" + String(item.ts || "") }
   function projectKey(item) { return String(item.repoRoot || item.repo || item.cwd || item.project || "") }
@@ -526,7 +570,7 @@ Item {
       var k = githubKinds[i]
       if (c[k] && (c[k].week > 0 || c[k].today > 0)) parts.push(githubKindLabel(k) + " " + c[k].today + "/" + c[k].week)
     }
-    if (!parts.length) return github.login ? "@" + github.login : ""
+    if (!parts.length) return privacyMode || !github.login ? "" : "@" + github.login
     return "today/week · " + parts.join(" · ")
   }
   // Why the GitHub grid is empty or behind, in the words the user needs.
@@ -537,7 +581,7 @@ Item {
       case "pending": return "fetching GitHub activity…"
       case "unavailable": return "GitHub unreachable · " + String(github.error || "fetch failed")
       case "stale": return "stale · " + String(github.error || "fetch failed") + " · cached rows"
-      case "ok": return (github.login ? "@" + github.login + " · " : "") + (github.coverage === "partial" ? "filling older days · " : "") + "hover · click pins · red = now"
+      case "ok": return (privacyMode || !github.login ? "" : "@" + github.login + " · ") + (github.coverage === "partial" ? "filling older days · " : "") + "hover · click pins · red = now"
       default: return ""
     }
   }
@@ -583,7 +627,7 @@ Item {
       var k = view.giteaKinds[i]
       if (c[k] && (c[k].week > 0 || c[k].today > 0)) parts.push(view.giteaKindLabel(k) + " " + c[k].today + "/" + c[k].week)
     }
-    if (!parts.length) return view.gitea.login ? "@" + view.gitea.login : ""
+    if (!parts.length) return privacyMode || !view.gitea.login ? "" : "@" + view.gitea.login
     return "today/week · " + parts.join(" · ")
   }
   // Why the Gitea grid is empty or behind, in the words the user needs.
@@ -596,7 +640,7 @@ Item {
       case "pending": return "fetching Gitea activity…"
       case "unavailable": return "Gitea unreachable · " + String(view.gitea.error || "fetch failed")
       case "stale": return "stale · " + String(view.gitea.error || "fetch failed") + " · cached rows"
-      case "ok": return (view.gitea.login ? "@" + view.gitea.login + " · " : "") + (view.gitea.coverage === "partial" ? "filling older days · " : "") + "hover · click pins · red = now"
+      case "ok": return (privacyMode || !view.gitea.login ? "" : "@" + view.gitea.login + " · ") + (view.gitea.coverage === "partial" ? "filling older days · " : "") + "hover · click pins · red = now"
       default: return ""
     }
   }
@@ -1091,6 +1135,11 @@ Item {
         }
         // Discoverability, faint and in the strip: the two keys everyone needs.
         // On the wallpaper SUPER+D opens the desktop view; in that view it closes it.
+        Tag {
+          text: !view.privacyMode ? "PRIVACY" : (view.settings.privacyUnlockCount > 0 ? "PRIVACY ON · " + view.settings.privacyUnlockCount + "/" + view.settings.privacyUnlockNeeded : "PRIVACY ON")
+          tone: view.privacyMode ? view.desk.yellow : view.textFaint
+          MouseArea { anchors.fill: parent; enabled: view.interactive; cursorShape: Qt.PointingHandCursor; onClicked: view.settings.togglePrivacyMode() }
+        }
         Tag { text: view.keyboardAvailable ? "SUPER+I HIDE DESK · SUPER+D / ESC CLOSE" : "SUPER+I HIDE DESK · SUPER+D SHOW OVER WINDOWS"; tone: view.textFaint }
         // Keyboard shortcuts only reach the overlay (the wallpaper layer has no keyboard focus).
         Tag { visible: view.keyboardAvailable; text: "1–9, 0 MODULES · J/K SESSION · ENTER FOCUS · A CLEAR"; tone: view.textFaint }
@@ -1193,8 +1242,8 @@ Item {
                 opacity: (sc.modelData.hosts || []).some(function(h) { return h && h.kind === "background" }) ? 0.72 : 1
                 color: hover.containsMouse ? Util.alpha(tone, 0.16) : Util.alpha(tone, 0.08)
                 border.color: view.keyboardSessionIndex === index ? tone : Util.alpha(tone, hover.containsMouse ? 0.9 : 0.45); border.width: view.keyboardSessionIndex === index ? 2 : 1; radius: view.radius
-                Image { anchors.fill: parent; visible: hover.containsMouse && view.previewsEnabled && sc.previewSource !== ""; source: sc.previewSource; fillMode: Image.PreserveAspectCrop; opacity: 0.28 }
-                Timer { interval: 600; running: hover.containsMouse && view.previewsEnabled && sc.previewSource === "" && !!(sc.modelData.window && sc.modelData.window.address); onTriggered: if (!previewProc.running) previewProc.running = true }
+                Image { anchors.fill: parent; visible: hover.containsMouse && view.previewsEnabled && !view.privacyMode && sc.previewSource !== ""; source: sc.previewSource; fillMode: Image.PreserveAspectCrop; opacity: 0.28 }
+                Timer { interval: 600; running: hover.containsMouse && view.previewsEnabled && !view.privacyMode && sc.previewSource === "" && !!(sc.modelData.window && sc.modelData.window.address); onTriggered: if (!previewProc.running) previewProc.running = true }
                 Process {
                   id: previewProc
                   command: ["bun", view.desk.previewPath, (sc.modelData.window || {}).address || ""]
@@ -1309,14 +1358,16 @@ Item {
                   }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; text: sc.modelData.project || "/"; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.subtitle; elide: Text.ElideMiddle }
                   PlainText {
+                    id: topicLine
+                    readonly property string shown: view.displayTopic(sc.modelData.topic)
                     visible: !sc.grouped
                     Layout.fillWidth: true
                     Layout.minimumWidth: 0
-                    text: sc.modelData.topic ? "↳ " + sc.modelData.topic : "↳ " + ((sc.modelData.window || {}).title || "topic unavailable")
-                    color: sc.modelData.topic ? sc.tone : view.textDim
+                    text: topicLine.shown ? "↳ " + topicLine.shown : "↳ " + (view.displayTitle((sc.modelData.window || {}).title) || "topic unavailable")
+                    color: topicLine.shown ? sc.tone : view.textDim
                     font.family: view.mono
                     font.pixelSize: Style.font.bodySmall
-                    font.bold: !!sc.modelData.topic
+                    font.bold: !!topicLine.shown
                     wrapMode: Text.Wrap
                     maximumLineCount: sessionFlow.dense ? 1 : 2
                     elide: Text.ElideRight
@@ -1375,9 +1426,9 @@ Item {
                     font.pixelSize: Style.font.caption
                     elide: Text.ElideRight
                   }
-                  PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!sc.modelData.cwd); text: sc.modelData.cwd || ""; color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
+                  PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!sc.modelData.cwd); text: view.displayPath(sc.modelData.cwd || ""); color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && ((sc.modelData.hosts || []).length > 0); text: "hosted in " + view.sessionHostLabel(sc.modelData) + (sc.modelData.window ? " · click jumps to the pane" : ((sc.modelData.hosts || []).some(function(h) { return h && h.kind === "background" && h.attachId }) ? " · click attaches a terminal" : " · no client window found")); color: sc.tone; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
-                  PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!sc.modelData.topic && !!(sc.modelData.window && sc.modelData.window.title)); text: sc.modelData.window ? (sc.modelData.window.title || "") : ""; color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                  PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!view.displayTopic(sc.modelData.topic) && !!(sc.modelData.window && sc.modelData.window.title)); text: view.displayTitle((sc.modelData.window || {}).title); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !sessionFlow.dense && (!!sc.modelData.git); text: sc.modelData.git ? ("git " + sc.modelData.git.branch + (sc.modelData.git.dirty ? " · " + sc.modelData.git.dirty + " changed" : " · clean") + (sc.modelData.git.ahead ? " · ↑" + sc.modelData.git.ahead : "") + (sc.modelData.git.behind ? " · ↓" + sc.modelData.git.behind : "") + (sc.modelData.git.conflicts ? " · " + sc.modelData.git.conflicts + " conflicts" : "")) : ""; color: sc.modelData.git && sc.modelData.git.conflicts ? view.desk.red : sc.modelData.git && sc.modelData.git.dirty ? view.desk.yellow : view.desk.green; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                   PlainText { Layout.fillWidth: true; Layout.minimumWidth: 0; text: "pid " + sc.modelData.pid + (sc.modelData.name ? " · " + sc.modelData.name : "") + (sc.modelData.window ? " · ws " + sc.modelData.window.workspace : " · no window") + " · cpu " + (sc.modelData.resources && sc.modelData.resources.cpuPct !== null ? sc.modelData.resources.cpuPct.toFixed(1) + "%" : "—") + " · ram " + ((sc.modelData.resources || {}).rss !== null ? view.desk.bytes((sc.modelData.resources || {}).rss) : "—") + " · " + ((sc.modelData.resources || {}).processes !== null ? ((sc.modelData.resources || {}).processes || 0) : "—") + " proc" + ((sc.modelData.resources || {}).gpuMemory ? " · gpu " + view.desk.bytes(sc.modelData.resources.gpuMemory) : ""); color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                 }
@@ -1840,7 +1891,7 @@ Item {
                 PlainText { text: (ri.pinned ? "★" : "") + view.desk.ago(ri.modelData.ts); color: ri.pinned ? ri.tone : view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; Layout.preferredWidth: Math.round(28 * Style.fontScale); horizontalAlignment: Text.AlignRight }
                 Tag { text: view.desk.providerLabel(ri.modelData.provider); tone: view.desk.providerColor(ri.modelData.provider) }
                 PlainText { text: (ri.modelData.project || "").replace(/^.*\//, "") ; color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption; Layout.preferredWidth: Math.round(110 * Style.fontScale); elide: Text.ElideLeft }
-                PlainText { Layout.fillWidth: true; text: ri.modelData.text || ""; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight; maximumLineCount: 1 }
+                PlainText { Layout.fillWidth: true; text: view.displayPrompt(ri.modelData.text); color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight; maximumLineCount: 1 }
                 PlainText {
                   visible: recentHover.hovered && (ri.navigable || ri.resumable)
                   text: ri.navigable ? "FOCUS" : "RESUME"
@@ -2326,7 +2377,7 @@ Item {
           moveId: "machine"
           draggable: true
           title: "MACHINE"
-          hint: ((view.snap.user ? view.snap.user + "@" : "") + (view.snap.host || "")) + " · up " + view.desk.dur(view.machine.uptime)
+          hint: view.machineHint()
           readonly property var net: view.machine.net || ({})
           readonly property var mem: view.machine.mem || ({})
           readonly property var cpu: view.machine.cpu || ({})
@@ -2345,11 +2396,11 @@ Item {
             Meter { Layout.fillWidth: true; Layout.preferredWidth: 1; label: "RAM"; value: view.desk.bytes(mc.mem.used) + "/" + view.desk.bytes(mc.mem.total) + " · " + view.desk.pct(mc.mem.pct); fraction: (mc.mem.pct || 0) / 100; tone: (mc.mem.pct || 0) > 90 ? view.desk.red : view.desk.green }
             Repeater {
               model: mc.disks.slice(0, 2)
-              delegate: Meter { required property var modelData; Layout.fillWidth: true; Layout.preferredWidth: 1; label: "DISK " + modelData.mount; value: view.desk.bytes(modelData.used) + "/" + view.desk.bytes(modelData.size) + " · " + view.desk.pct(modelData.pct); fraction: (modelData.pct || 0) / 100; tone: (modelData.pct || 0) > 90 ? view.desk.red : view.desk.yellow }
+              delegate: Meter { required property var modelData; Layout.fillWidth: true; Layout.preferredWidth: 1; label: "DISK " + view.displayPath(modelData.mount); value: view.desk.bytes(modelData.used) + "/" + view.desk.bytes(modelData.size) + " · " + view.desk.pct(modelData.pct); fraction: (modelData.pct || 0) / 100; tone: (modelData.pct || 0) > 90 ? view.desk.red : view.desk.yellow }
             }
             Meter {
               Layout.fillWidth: true; Layout.preferredWidth: 1
-              label: mc.net.wireless ? "WIFI " + (mc.net.ssid || "") : "NET " + (mc.net.dev || "—")
+              label: view.wifiLabel(mc.net)
               value: mc.net.signal !== null && mc.net.signal !== undefined ? mc.net.signal + " dBm" : (mc.net.dev ? "up" : "—")
               // -30 dBm great … -90 dBm dead
               fraction: mc.net.signal !== null && mc.net.signal !== undefined ? Math.max(0, Math.min(1, (Number(mc.net.signal) + 90) / 60)) : (mc.net.dev ? 1 : 0)
@@ -2360,8 +2411,8 @@ Item {
               Layout.columnSpan: 2
               Layout.fillWidth: true
               spacing: Style.spacing.md
-              PlainText { text: "WAN " + (view.machine.externalIp || "—"); color: view.machine.externalIp ? view.desk.cyan : view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
-              PlainText { visible: !!mc.net.addr; text: "LAN " + (mc.net.addr || ""); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
+              PlainText { text: "WAN " + view.wanText(); color: view.privacyMode || !view.machine.externalIp ? view.textFaint : view.desk.cyan; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
+              PlainText { visible: !view.privacyMode && !!mc.net.addr; text: "LAN " + (mc.net.addr || ""); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption; elide: Text.ElideMiddle }
               Item { Layout.fillWidth: true }
             }
             RowLayout {
@@ -2481,7 +2532,7 @@ Item {
           PlainText {
             Layout.fillWidth: true
             elide: Text.ElideRight
-            text: (view.keyboardAvailable ? "SUPER+I hide desk  ·  SUPER+D / ESC close" : "SUPER+I hide desk  ·  SUPER+D show desktop") + "  ·  right-click a card to inspect"
+            text: (view.keyboardAvailable ? "SUPER+I hide desk  ·  SUPER+D / ESC close" : "SUPER+I hide desk  ·  SUPER+D show desktop") + "  ·  SUPER+SHIFT+I privacy ×3 off  ·  right-click a card to inspect"
             color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.caption
           }
           PlainText {
@@ -2590,8 +2641,8 @@ Item {
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.inspectedSession = null }
         }
       }
-      PlainText { Layout.fillWidth: true; text: sessionInspector.session.cwd || "unknown project"; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.subtitle; elide: Text.ElideMiddle }
-      PlainText { Layout.fillWidth: true; text: (sessionInspector.session.window || {}).title || "no window title"; color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+      PlainText { Layout.fillWidth: true; text: view.displayPath(sessionInspector.session.cwd || "") || "unknown project"; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.subtitle; elide: Text.ElideMiddle }
+      PlainText { Layout.fillWidth: true; text: view.displayTitle((sessionInspector.session.window || {}).title) || "no window title"; color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
       PlainText { Layout.fillWidth: true; visible: (sessionInspector.session.hosts || []).length > 0; text: view.sessionHostDetail(sessionInspector.session); color: sessionInspector.tone; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
       PlainText { Layout.fillWidth: true; text: "CPU " + (sessionInspector.session.resources && sessionInspector.session.resources.cpuPct !== null ? sessionInspector.session.resources.cpuPct.toFixed(1) + "%" : "—") + "   ·   RAM " + ((sessionInspector.session.resources || {}).rss !== null ? view.desk.bytes((sessionInspector.session.resources || {}).rss) : "—") + "   ·   " + ((sessionInspector.session.resources || {}).processes !== null ? ((sessionInspector.session.resources || {}).processes || 0) : "—") + " PROCESSES" + ((sessionInspector.session.resources || {}).gpuMemory ? "   ·   GPU " + view.desk.bytes(sessionInspector.session.resources.gpuMemory) : ""); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.bodySmall }
       PlainText {
@@ -2653,6 +2704,7 @@ Item {
           }
         }
         Tag {
+          visible: !view.privacyMode
           text: view.previewsEnabled ? "PREVIEWS ON" : "PREVIEWS OFF"
           tone: view.previewsEnabled ? view.desk.green : view.textFaint
           MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.previewsEnabled = !view.previewsEnabled }
@@ -2705,7 +2757,7 @@ Item {
         Item { Layout.fillWidth: true }
         Tag { text: "CLOSE"; tone: view.textDim; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.selectedPrompt = null } }
       }
-      PlainText { Layout.fillWidth: true; text: promptDrawer.prompt.text || ""; color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.body; wrapMode: Text.Wrap }
+      PlainText { Layout.fillWidth: true; text: view.displayPrompt(promptDrawer.prompt.text); color: view.desk.themeForeground; font.family: view.mono; font.pixelSize: Style.font.body; wrapMode: Text.Wrap }
       RowLayout {
         spacing: Style.spacing.sm
         Tag { text: "COPY EXCERPT"; tone: view.desk.cyan; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.desk.copyText(promptDrawer.prompt.text) } }
@@ -2716,7 +2768,7 @@ Item {
       PlainText { visible: promptDrawer.group.length > 1; text: "SAME SESSION · " + promptDrawer.group.length + " RECENT PROMPTS"; color: view.textFaint; font.family: view.mono; font.pixelSize: Style.font.caption; font.bold: true }
       Repeater {
         model: promptDrawer.group
-        delegate: PlainText { required property var modelData; Layout.fillWidth: true; text: "• " + modelData.text; color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+        delegate: PlainText { required property var modelData; Layout.fillWidth: true; text: "• " + view.displayPrompt(modelData.text); color: view.textDim; font.family: view.mono; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
       }
     }
   }

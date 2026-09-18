@@ -381,8 +381,8 @@ describe("right column fits a 1080p desk", () => {
   test("MACHINE is a two-column grid with a one-line footer, and the SUPER legend sits under it", () => {
     const view = readFileSync(join(import.meta.dir, "InfoView.qml"), "utf8");
     expect(view).toContain("// Cockpit density: two meters per row");
-    expect(view).toContain('text: "WAN " + (view.machine.externalIp || "—")');
-    expect(view).toContain('"SUPER+I hide desk  ·  SUPER+D show desktop") + "  ·  right-click a card to inspect"');
+    expect(view).toContain('text: "WAN " + view.wanText()');
+    expect(view).toContain('"SUPER+I hide desk  ·  SUPER+D show desktop") + "  ·  SUPER+SHIFT+I privacy ×3 off  ·  right-click a card to inspect"');
     expect(view).toContain("readonly property int metaWidth");
   });
 });
@@ -438,7 +438,9 @@ describe("session card lines never spill into the neighbouring card", () => {
   const block = view.slice(view.lastIndexOf("ColumnLayout", start), view.indexOf("\n                }", start));
   const tag = view.slice(view.indexOf("component Tag: Rectangle"), view.indexOf("component PowerToggle"));
   const stale = card.slice(card.indexOf("sc.modelData.stale === true"), card.indexOf("Item { Layout.fillWidth: true; Layout.minimumWidth: 0 }"));
-  const topicMark = block.indexOf('sc.modelData.topic ? "↳ "');
+  // Anchored on the arrow rather than on the expression: the topic is read
+  // through a masked binding now, so the old literal no longer appears.
+  const topicMark = block.indexOf('? "↳ "');
   const topic = block.slice(block.lastIndexOf("PlainText {", topicMark), block.indexOf("maximumLineCount", topicMark));
 
   test("every fill-width single-line text in a session card elides", () => {
@@ -503,6 +505,84 @@ describe("recent tasks keep quieter providers", () => {
     const positions = limited.map((row: any) => rows.indexOf(row));
     expect(positions).toEqual(positions.slice().sort((a: number, b: number) => a - b));
     expect(fairRecentWindow([...rows, quiet], 80, 6)).toEqual(rows);
+  });
+});
+
+describe("stream privacy mode", () => {
+  test("persists a toggle that masks identity and leaves OSS project names", () => {
+    expect(settings).toContain("property bool privacyMode: false");
+    expect(settings).toContain("function togglePrivacyMode()");
+    expect(settings).toContain("privacyMode: privacyMode");
+    expect(settings).toContain("readonly property int privacyUnlockNeeded: 3");
+    expect(service).toContain("function togglePrivacy(): void { dashboardSettings.togglePrivacyMode() }");
+    expect(overlay).toContain("if (!event.isAutoRepeat) dashboardSettings.togglePrivacyMode()");
+    expect(service).toContain("function getPrivacy(): string");
+    expect(view).toContain("function wanText()");
+    expect(view).toContain("function wifiLabel(net)");
+    expect(view).toContain("function machineHint()");
+    expect(view).toContain("function displayPath(path)");
+    expect(view).toContain('return privacyMode ? "—" : (view.machine.externalIp || "—")');
+    expect(view).toContain('return privacyMode ? "WIFI" : ("WIFI " + (n.ssid || ""))');
+    expect(view).toContain('if (privacyMode) return "privacy · " + up');
+    expect(view).toContain("p.replace(/^\\/home\\/[^/]+/, \"~\")");
+    expect(view).toContain("visible: !view.privacyMode && !!mc.net.addr");
+    expect(view).toContain("privacyMode || !github.login");
+    expect(view).toContain("privacyMode || !view.gitea.login");
+    expect(view).toContain("function displayTitle(title)");
+    expect(view).toContain("view.displayTitle((sessionInspector.session.window || {}).title)");
+    expect(view).toContain("view.displayTitle((sc.modelData.window || {}).title)");
+    expect(view).not.toContain('text: sc.modelData.window ? (sc.modelData.window.title || "") : ""');
+    expect(view).not.toContain('(sessionInspector.session.window || {}).title || "no window title"');
+    expect(view).toContain("onPrivacyModeChanged: if (privacyMode && previewsEnabled) previewsEnabled = false");
+    expect(view).toContain("view.previewsEnabled && !view.privacyMode");
+    expect(view).toContain('text: !view.privacyMode ? "PRIVACY" : (view.settings.privacyUnlockCount > 0 ? "PRIVACY ON · " + view.settings.privacyUnlockCount + "/" + view.settings.privacyUnlockNeeded : "PRIVACY ON")');
+    expect(view).not.toContain('text: "WAN " + (view.machine.externalIp || "—")');
+    expect(view).not.toContain("WIFI \" + (mc.net.ssid");
+  });
+
+  test("one press enables privacy, three presses disable it", () => {
+    const source = settings.match(/function privacyUnlockStep\([\s\S]*?\n  \}/)?.[0];
+    expect(source).toBeTruthy();
+    const privacyUnlockStep = Function(`return (${source})`)();
+    expect(privacyUnlockStep(false, 0, 3)).toEqual({ on: true, count: 0 });
+    expect(privacyUnlockStep(true, 0, 3)).toEqual({ on: true, count: 1 });
+    expect(privacyUnlockStep(true, 1, 3)).toEqual({ on: true, count: 2 });
+    expect(privacyUnlockStep(true, 2, 3)).toEqual({ on: false, count: 0 });
+    expect(privacyUnlockStep(true, 5, 3)).toEqual({ on: false, count: 0 });
+    expect(settings).toContain("privacyUnlockReset.restart()");
+    expect(settings).toContain("readonly property int privacyUnlockMs: 2000");
+    expect(service).toContain("function setPrivacy(v: string): void { dashboardSettings.setPrivacyMode(");
+  });
+
+  test("window titles lose account, host and home path under privacy", () => {
+    const source = view.match(/function displayTitle\([\s\S]*?\n  \}/)?.[0];
+    expect(source).toBeTruthy();
+    const masked = Function("privacyMode", `return (${source})`)(true);
+    const clear = Function("privacyMode", `return (${source})`)(false);
+    expect(masked("larry@box: /home/larry/Projects/x")).toBe("user@host: ~/Projects/x");
+    expect(masked("claude — /home/larry/work")).toBe("claude — ~/work");
+    expect(masked("Processing… task")).toBe("Processing… task");
+    expect(masked("")).toBe("");
+    expect(clear("larry@box: /home/larry/Projects/x")).toBe("larry@box: /home/larry/Projects/x");
+  });
+
+  test("recent-task prompts keep the first four words and mask the rest", () => {
+    const source = view.match(/function obfuscatePrompt\([\s\S]*?\n  \}/)?.[0];
+    expect(source).toBeTruthy();
+    const obfuscatePrompt = Function(`return (${source})`)();
+    expect(obfuscatePrompt("one two three four five six seven")).toBe("one two three four ···");
+    expect(obfuscatePrompt("one two three four five")).toBe("one two three four ···");
+    expect(obfuscatePrompt("one two three four")).toBe("one two three four");
+    expect(obfuscatePrompt("one two three")).toBe("one two three");
+    expect(obfuscatePrompt("  one   two  three four   five  ")).toBe("one two three four ···");
+    expect(obfuscatePrompt("")).toBe("");
+    expect(obfuscatePrompt(null)).toBe("");
+    expect(view).toContain("function displayPrompt(text)");
+    expect(view).toContain("view.displayPrompt(ri.modelData.text)");
+    expect(view).toContain("view.displayPrompt(promptDrawer.prompt.text)");
+    expect(view).toContain("view.displayPrompt(modelData.text)");
+    expect(view).not.toContain("text: ri.modelData.text || \"\"");
+    expect(view).not.toContain("text: promptDrawer.prompt.text || \"\"");
   });
 });
 
