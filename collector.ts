@@ -437,23 +437,37 @@ async function hermesUsageActivity() {
   }
   const summary = hermesUsageSummary(current, heatDays.map(localDayKey));
   if (!summary) return null;
+  // MONTHLY comes straight from OpenRouter's key-usage API (via Hermes's
+  // cache), the only source with a real account-wide budget — there is
+  // nothing analogous to derive from the local ledger, so this limit bar
+  // exists only when that read succeeded.
+  const limits = summary.monthlyLimit
+    ? [{ label: "MONTHLY", title: "Monthly", percent: summary.monthlyLimit.percent }]
+    : [];
   const usage = normalizeUsage({
     name: "Hermes", ready: true, tierLabel: "",
     todayPrompts: summary.todayPrompts, totalPrompts: summary.totalPrompts,
     todaySessions: summary.todaySessions, totalSessions: summary.totalSessions,
     todayTotalTokens: summary.todayTotalTokens,
     modelUsage: summary.modelUsage, todayTokensByModel: summary.todayTokensByModel, modelSessions: summary.modelSessions,
-    recentDays: summary.recentDays, limits: [],
-    usageStatusText: "estimated by Hermes from live OpenRouter pricing — not a verified invoice",
+    recentDays: summary.recentDays, limits,
+    // Verified live this figure can diverge sharply from reality: the local
+    // ledger only goes back to whenever Hermes's session tracking last
+    // started, not true lifetime OpenRouter spend, so "ledger" is a
+    // fallback — say so — and "openrouter" (the account's own key-usage
+    // API) is the trustworthy case.
+    usageStatusText: summary.costSource === "openrouter"
+      ? "cost from OpenRouter's own key-usage API (Hermes-cached) — tokens from Hermes's local session ledger"
+      : "estimated from Hermes's local session ledger only — not lifetime OpenRouter spend, and not a verified invoice",
   });
   // pricing.json is a pinned LiteLLM snapshot with no entries for most
   // OpenRouter model ids (deepseek/deepseek-v4.1-flash among them), so the
-  // normalizeUsage() pass above reports this unpriced. Hermes already
-  // resolved a live OpenRouter rate per row (cost_source:
-  // provider_models_api) that is at least as current as a pinned snapshot
-  // would be, so use it instead of leaving the card blank.
+  // normalizeUsage() pass above reports this unpriced regardless of source.
+  // summary.costLifetimeUsd/costTodayUsd already picked the best available
+  // number (OpenRouter's own account figure when present, else the
+  // ledger's per-row sum) — see hermes-usage.ts's module header.
   const totals = usage.value.totals;
-  const priced = totals.inputTokens + totals.outputTokens + totals.cacheReadInputTokens + totals.cacheCreationInputTokens > 0;
+  const priced = totals.inputTokens + totals.outputTokens + totals.cacheReadInputTokens + totals.cacheCreationInputTokens > 0 || summary.costSource === "openrouter";
   usage.value = { lifetime: summary.costLifetimeUsd, today: summary.costTodayUsd, pricedShare: priced ? 1 : 0, unpriced: [], totals };
   return usage;
 }
