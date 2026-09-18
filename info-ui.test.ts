@@ -590,14 +590,18 @@ describe("github activity heatmap", () => {
   test("registers GITHUB as a removable module beside ACTIVITY and reaches it from the keyboard", () => {
     const ids = [...settings.matchAll(/\{ id: "([a-zA-Z]+)", label: "[^"]+" \}/g)].map(match => match[1]);
     expect(ids.indexOf("github")).toBe(ids.indexOf("activity") + 1);
-    expect(ids).toHaveLength(12);
-    expect(ids[11]).toBe("gitea");
+    expect(ids).toHaveLength(13);
     expect(ids[10]).toBe("media");
+    expect(ids[11]).toBe("gitea");
     expect(overlay).toContain("event.key >= Qt.Key_0 && event.key <= Qt.Key_9");
     expect(overlay).toContain("event.key === Qt.Key_0 ? 9 : event.key - Qt.Key_1");
     // Key n toggles definitions[n-1]; 0 is the tenth. Documented as 4 = GITHUB, 0 = PROJECTS.
     expect(ids[3]).toBe("github");
     expect(ids[9]).toBe("projects");
+    // FLEET is appended after MEDIA and GITEA, beyond the keyboard's ten
+    // digit slots, rather than inserted earlier where it would reassign an
+    // existing digit shortcut to a different section.
+    expect(ids[12]).toBe("fleet");
   });
 
   test("shares one HeatPanel across equally sized activity, GitHub and Gitea cards", () => {
@@ -643,7 +647,7 @@ test("persisted Ollama origins reject credentials and request paths", () => {
 describe("media controls card", () => {
   test("registers a reorderable lower-right MPRIS card with prev/play/next and a title line", () => {
     expect(settings).toContain('{ id: "media", label: "MEDIA" }');
-    expect(settings).toContain('property var rightOrder: ["usage", "localAi", "machine", "media"]');
+    expect(settings).toContain('property var rightOrder: ["usage", "localAi", "fleet", "machine", "media"]');
     expect(view).toContain('title: "MEDIA CONTROLS"');
     expect(view).toContain('moveId: "media"');
     expect(view).toContain("import Quickshell.Services.Mpris");
